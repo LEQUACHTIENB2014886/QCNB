@@ -1,0 +1,61 @@
+stages:
+  - build
+  - deploy
+
+variables:
+  SERVICE_NAME: "nginx-qcnb-web"          # 服务名称，定义后自动应用于整个流程
+  PORT_MAPPING: "5175:443"       # 端口映射，定义后自动应用于 Docker 启动
+  TAR_IMAGES_FILE: "${SERVICE_NAME}.tar"  # 构建的 Docker 镜像文件名称
+
+build:
+  stage: build
+  image: docker:latest 
+  services:
+    - docker:dind
+  before_script:
+    - docker info
+  script:
+    - mkdir -p docker_cache
+    - docker build -t ${SERVICE_NAME}:latest .
+    - docker save -o docker_cache/${TAR_IMAGES_FILE} ${SERVICE_NAME}:latest
+    - ls -l docker_cache/  # 确认缓存目录是否创建成功
+  cache:
+    key: "${SERVICE_NAME}"
+    paths:
+      - "docker_cache/"  # 缓存 Docker 镜像文件
+  only:
+    - main
+
+deploy:
+  stage: deploy
+  image: alpine:latest
+  before_script:
+      - apk add --update --no-cache openssh-client
+      - eval $(ssh-agent -s)
+      - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+      - mkdir -p ~/.ssh
+      - chmod 700 ~/.ssh
+      - ssh-keyscan -H 192.168.40.105 >> ~/.ssh/known_hosts
+      - chmod 644 ~/.ssh/known_hosts
+  cache:
+    key: "${SERVICE_NAME}"
+    paths:
+      - "docker_cache/"  # 提取缓存，确保镜像文件存在
+  script:
+    # 验证缓存文件是否存在
+    - ls -l docker_cache/
+
+    # 传输镜像文件到目标服务器
+    - scp docker_cache/${TAR_IMAGES_FILE} administrator@192.168.40.105:~/${TAR_IMAGES_FILE}
+
+    # 删除旧容器和镜像
+    - ssh administrator@192.168.40.105 "docker ps -a --filter name=${SERVICE_NAME} -q | xargs -r docker stop | xargs -r docker rm"
+    - ssh administrator@192.168.40.105 "docker rmi ${SERVICE_NAME}:latest || true"
+
+    # 加载新的镜像并启动容器
+    - ssh administrator@192.168.40.105 "docker load -i ${TAR_IMAGES_FILE} && rm -f ${TAR_IMAGES_FILE}"
+    - ssh administrator@192.168.40.105 "docker run -d --name ${SERVICE_NAME} -p ${PORT_MAPPING} ${SERVICE_NAME}:latest"
+  retry: 2
+  only:
+    - main
+
